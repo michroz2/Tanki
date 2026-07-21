@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "Tanki",
+			"path": "Firmware/Tanki"
+		}
+	],
+	"settings": {}
+}
