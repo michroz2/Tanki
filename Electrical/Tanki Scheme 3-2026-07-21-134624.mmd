@@ -1,0 +1,63 @@
+flowchart LR
+    %% Стили блоков для читаемости
+    classDef power fill:#ffe6e6,stroke:#cc0000,stroke-width:2px,color:#000;
+    classDef clean fill:#e6f2ff,stroke:#0066cc,stroke-width:2px,color:#000;
+    classDef dirty fill:#fff2e6,stroke:#cc6600,stroke-width:2px,color:#000;
+    classDef brain fill:#e6f3ff,stroke:#0066cc,stroke-width:2px,color:#000;
+    classDef motors fill:#e6ffe6,stroke:#009933,stroke-width:2px,color:#000;
+    classDef hw fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000;
+
+    %% Источники питания
+    BATT(("Аккумулятор<br/>7.4V")):::power
+    GND(("ОБЩИЙ МИНУС<br/>(Шина GND)")):::power
+
+    subgraph DC_System ["Блок понижающих конвертеров"]
+        DC1["DC-DC №1<br/>(Чистые 5.0V)"]:::clean
+        DC2["DC-DC №2<br/>(Грязные 5.0V)"]:::dirty
+    end
+
+    %% Логика управления
+    RX["Приемник FlySky<br/>(FS-iA6B)"]:::brain
+    ESP{"ESP32<br/>(LOLIN32 Lite)"}:::brain
+
+    %% Периферия (Драйверы и Усилители)
+    BTS_L["Драйвер Левый<br/>(BTS7960)"]:::motors
+    BTS_R["Драйвер Правый<br/>(BTS7960)"]:::motors
+    DRV["Драйвер Башни<br/>(DRV8833)"]:::motors
+    Servo["Сервопривод Орудия<br/>(MG90S)"]:::motors
+    MAX["Усилитель Звука<br/>(MAX98357A)"]:::motors
+
+    %% Физические механизмы
+    ML(("Левый Мотор")):::hw
+    MR(("Правый Мотор")):::hw
+    MT(("Мотор Башни")):::hw
+    SPK(("Динамик 3W")):::hw
+
+    %% ====== ПИТАНИЕ 7.4V ======
+    BATT == "Силовые 7.4V" ===> DC1 & DC2 & BTS_L & BTS_R & DRV
+
+    %% ====== ПИТАНИЕ 5.0V ======
+    DC1 -- "Чистые 5V" --> ESP & RX & BTS_L & BTS_R
+    DC2 -- "Грязные 5V" --> Servo & MAX
+
+    %% ====== ОБЩАЯ ЗЕМЛЯ ======
+    BATT -. "GND" .-> GND
+    DC1 & DC2 -. "GND" .-> GND
+    GND -. "GND" .-> ESP & RX & Servo & MAX & BTS_L & BTS_R & DRV
+
+    %% ====== УПРАВЛЯЮЩИЕ СИГНАЛЫ (ПИНЫ) ======
+    RX -- "Шлейф i-BUS (Пин 34)" --> ESP
+
+    ESP -- "Пины 16, 17 (L_PWM, R_PWM)" --> BTS_L
+    ESP -- "Пины 19, 23 (L_PWM, R_PWM)" --> BTS_R
+    ESP -- "Пин 3V3 (Включение L_EN + R_EN)" --> BTS_L & BTS_R
+
+    ESP -- "Пины 18, 5 (IN1, IN2)" --> DRV
+    ESP -- "Пин 32 (ШИМ Сигнал)" --> Servo
+    ESP -- "Пины 25, 26, 27 (LRC, BCLK, DIN)" --> MAX
+
+    %% ====== ВЫХОДЫ НА МЕХАНИЗМЫ ======
+    BTS_L -- "Клеммы M+ / M-" --> ML
+    BTS_R -- "Клеммы M+ / M-" --> MR
+    DRV -- "OUT1 / OUT2" --> MT
+    MAX -- "Клеммы + / -" --> SPK

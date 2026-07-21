@@ -1,0 +1,38 @@
+flowchart LR
+    %% Стили элементов
+    classDef power fill:#ffe6e6,stroke:#cc0000,stroke-width:2px,color:#000;
+    classDef clean fill:#e6f2ff,stroke:#0066cc,stroke-width:2px,color:#000;
+    classDef dirty fill:#fff2e6,stroke:#cc6600,stroke-width:2px,color:#000;
+    classDef brain fill:#e6f3ff,stroke:#0066cc,stroke-width:2px,color:#000;
+    classDef motors fill:#e6ffe6,stroke:#009933,stroke-width:2px,color:#000;
+
+    %% Источники и Шина
+    BATT(("Аккумулятор<br/>7.4V")):::power
+    GND(("ОБЩИЙ МИНУС<br/>(Шина GND)")):::power
+
+    subgraph PowerSystem ["Раздельное питание (Два Mini-360)"]
+        DC1["DC-DC №1<br/>(Чистые 5V)"]:::clean
+        DC2["DC-DC №2<br/>(Грязные 5V)"]:::dirty
+    end
+
+    %% Логика
+    RX["Приемник FlySky"]:::brain
+    ESP{"ESP32<br/>(LOLIN32 Lite)"}:::brain
+
+    %% Исполнительные модули
+    Servo["Сервопривод MG90S"]:::motors
+    MAX["Усилитель MAX98357A"]:::motors
+    BTS["Драйверы Хода<br/>(BTS7960)"]:::motors
+    DRV["Драйвер Башни<br/>(DRV8833)"]:::motors
+
+    %% --- РАЗВОДКА ПЛЮСА (7.4V) ---
+    BATT == "Сила 7.4V (+)" ===> DC1 & DC2 & BTS & DRV
+
+    %% --- РАЗВОДКА ПЛЮСА (5V) ---
+    DC1 -- "Чистые 5V (+)" --> ESP & RX & BTS
+    DC2 -- "Грязные 5V (+)" --> Servo & MAX
+
+    %% --- СБОРКА ОБЩЕЙ ЗЕМЛИ (GND) ---
+    BATT -. "GND (-)" .-> GND
+    DC1 & DC2 -. "GND (-)" .-> GND
+    GND -. "GND (-)" .-> ESP & RX & Servo & MAX & BTS & DRV

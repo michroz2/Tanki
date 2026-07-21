@@ -1,0 +1,54 @@
+graph TD
+    subgraph Power [Питание]
+        BATT[Аккумулятор 7.4V 2S LiPo]
+        DCDC[DC-DC Понижающий 5V/3A]
+    end
+
+    subgraph Brain [Управление]
+        ESP[Процессор ESP32]
+        RX[Приемник FS-iA6B]
+    end
+
+    subgraph Motors [Ходовая часть]
+        BTS_L[Драйвер BTS7960 Левый]
+        BTS_R[Драйвер BTS7960 Правый]
+        M_L((Мотор Левый))
+        M_R((Мотор Правый))
+    end
+
+    subgraph Turret [Башня и Орудие]
+        DRV[Драйвер DRV8833]
+        M_Turret((Мотор Башни))
+        Servo[Сервопривод MG90S]
+    end
+
+    subgraph Sound [Звук]
+        MAX[Усилитель MAX98357A]
+        SPK((Динамик 3W))
+    end
+
+    %% Силовые связи (7.4V)
+    BATT ==>|7.4V Силовые| BTS_L
+    BATT ==>|7.4V Силовые| BTS_R
+    BATT ==>|7.4V Силовые| DRV
+    BATT ==>|7.4V Вход| DCDC
+
+    %% Питание логики (5V)
+    DCDC -->|5V Стабильные| ESP
+    DCDC -->|5V| RX
+    DCDC -->|5V| Servo
+    DCDC -->|5V| MAX
+
+    %% Сигналы
+    RX -.->|UART / i-BUS| ESP
+    ESP -.->|4x PWM пина| BTS_L
+    ESP -.->|4x PWM пина| BTS_R
+    ESP -.->|2x PWM пина| DRV
+    ESP -.->|1x PWM пин| Servo
+    ESP -.->|3x I2S пина| MAX
+
+    %% Подключение нагрузки
+    BTS_L === M_L
+    BTS_R === M_R
+    DRV === M_Turret
+    MAX === SPK
