@@ -1,27 +1,29 @@
 /**
  * @file main.cpp
- * @version 0.2.1
+ * @version 0.2
  * @brief Главный диспетчер задач.
- * * Диагностический шаг 2.1: Проверка ходовой части прямой цифровой логикой (HIGH/LOW).
+ * * Архитектурный шаг 2: Изоляция ШИМ-подсистемы хода и добавление тестового автомата.
  */
 
  #include <Arduino.h>
  #include "ibus_parser.h"
  #include "motor_control.h"
  
- // Заблокированная периферия башни и орудия
+ // Драйвер DRV8833 (Привод вращения башни)
  const int PIN_TURRET_IN1 = 32;
  const int PIN_TURRET_IN2 = 33;
+ 
+ // Пин управления сервоприводом подъема орудия MG90S
  const int PIN_SERVO = 14;
  
  // Пин аппаратного UART для i-BUS
  const int PIN_IBUS_RX = 34;
  
  void setup() {
-   // Инициализация ходовых пинов в режиме GPIO OUTPUT
+   // 1. Инициализация ходовой части (ШИМ 20 кГц) и безопасный старт (0)
    initMotors();
  
-   // Аппаратный Safety Lock для башни и сервопривода
+   // 2. Аппаратный Safety Lock: блокировка башни и орудия
    pinMode(PIN_TURRET_IN1, OUTPUT);
    pinMode(PIN_TURRET_IN2, OUTPUT);
    pinMode(PIN_SERVO, OUTPUT);
@@ -30,14 +32,14 @@
    digitalWrite(PIN_TURRET_IN2, LOW);
    digitalWrite(PIN_SERVO, LOW);
  
-   // Инициализация портов связи
+   // 3. Инициализация портов связи
    Serial.begin(115200);
    initIBus(PIN_IBUS_RX);
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("DIAGNOSTIC MODE ACTIVE [v0.2.1]: Direct GPIO Write.");
-   Serial.println("Testing raw 3.3V logic signals on motor pins.");
+   Serial.println("SAFE CORE ACTIVE [v0.2]: Motor PWM Initialized.");
+   Serial.println("Starting hardware test sequence (motors only).");
    Serial.println("================================================\n");
  }
  
@@ -46,38 +48,40 @@
    static unsigned long lastTestTime = 0;
    static int testState = 0;
  
-   // Полноценный опрос i-BUS (для контроля параллельной работы систем)
+   // Опрос изолированного аппаратного модуля i-BUS
    if (readIBus()) {
      unsigned long currentTime = millis();
      if (currentTime - lastPrintTime >= 100) {
        lastPrintTime = currentTime;
+       // Вывод телеметрии сохраняется для проверки связи с пультом
        Serial.printf("CH1: %4d | CH2: %4d | CH3: %4d | CH4: %4d\n", 
                      channels[0], channels[1], channels[2], channels[3]);
      }
    }
  
-   // Неблокирующий автомат переключения прямых логических уровней
+   // Простой неблокирующий автомат тестирования ходовой части
+   // Переключает состояние моторов каждые 3 секунды
    unsigned long currentTime = millis();
    if (currentTime - lastTestTime >= 3000) {
      lastTestTime = currentTime;
-     testState = (testState + 1) % 4;
+     testState = (testState + 1) % 4; // Переключение 0 -> 1 -> 2 -> 3 -> 0
  
      switch (testState) {
        case 0:
-         Serial.println(">>> ТЕСТ: Остановка моторов (0V)");
+         Serial.println(">>> АВТОТЕСТ: Остановка моторов (0)");
          setMotorSpeeds(0, 0);
          break;
        case 1:
-         Serial.println(">>> ТЕСТ: Полный вперед (Постоянный HIGH)");
-         setMotorSpeeds(255, 255);
+         Serial.println(">>> АВТОТЕСТ: Движение ВПЕРЕД (Мощность: 100/255)");
+         setMotorSpeeds(100, 100);
          break;
        case 2:
-         Serial.println(">>> ТЕСТ: Остановка моторов (0V)");
+         Serial.println(">>> АВТОТЕСТ: Остановка моторов (0)");
          setMotorSpeeds(0, 0);
          break;
        case 3:
-         Serial.println(">>> ТЕСТ: Полный назад (Постоянный HIGH в реверс)");
-         setMotorSpeeds(-255, -255);
+         Serial.println(">>> АВТОТЕСТ: Движение НАЗАД (Мощность: -100/255)");
+         setMotorSpeeds(-100, -100);
          break;
      }
    }
