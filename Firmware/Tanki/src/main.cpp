@@ -43,7 +43,7 @@
    
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.6]: Turret Control & I2S Audio Active.");
+   Serial.println("SYSTEM READY [v0.7]: I2S LittleFS Audio Running.");
    Serial.println("Waiting for FlySky RC input...");
    Serial.println("================================================\n");
  }

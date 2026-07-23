@@ -1,101 +1,105 @@
 /**
  * @file audio_system.cpp
- * @version 0.6
- * @brief Реализация подсистемы управления звуком I2S.
- * * В текущей версии реализована генерация чистого тестового 
- * синусоидального тона (440 Гц) для проверки аппаратной части
- * (модуля MAX98357A) и стабильности многопоточной архитектуры.
+ * @version 0.7
+ * @brief Реализация подсистемы управления звуком I2S с чтением WAV из LittleFS.
  */
 
- #include "audio_system.h"
- #include <driver/i2s.h>
- #include <math.h>
- 
- // Аппаратные константы I2S
- const i2s_port_t I2S_PORT = I2S_NUM_0;    // Используем нулевой порт I2S
- const int SAMPLE_RATE = 16000;            // Частота дискретизации 16 кГц
- const int PIN_I2S_BCLK = 26;              // Пин тактирования битов (BCLK)
- const int PIN_I2S_LRC = 25;               // Пин выбора канала (LRC/WS)
- const int PIN_I2S_DIN = 27;               // Пин вывода данных (DIN)
- 
- TaskHandle_t audioTaskHandle = NULL;      // Хэндл для управления задачей FreeRTOS
- 
- /**
-  * @brief Фоновая задача FreeRTOS для генерации аудиосигнала.
-  * Жестко привязана к Ядру 0. Генерирует непрерывный тон.
-  * * @param pvParameters Указатель на параметры задачи (не используется)
-  */
- void audioTask(void *pvParameters) {
-     // Параметры тестового тона (Нота Ля, 440 Гц)
-     const float frequency = 440.0;
-     const float amplitude = 8000.0; // Громкость (от 0 до 32767 для 16 бит)
-     float phase = 0.0;
-     const float phaseIncrement = (2.0f * PI * frequency) / SAMPLE_RATE;
- 
-     // Инициализация DMA-буфера. Размер 128 сэмплов.
-     // Умножаем на 2, так как I2S ожидает стерео-формат данных (Левый + Правый канал)
-     const int numSamples = 128;
-     int16_t samples[numSamples * 2]; 
- 
-     while (true) {
-         // Заполнение буфера математической синусоидой
-         for (int i = 0; i < numSamples; i++) {
-             int16_t sample = (int16_t)(sin(phase) * amplitude);
-             samples[i * 2] = sample;       // Левый канал
-             samples[i * 2 + 1] = sample;   // Правый канал
-             
-             phase += phaseIncrement;
-             if (phase >= 2.0f * PI) {
-                 phase -= 2.0f * PI;
-             }
-         }
- 
-         size_t bytesWritten;
-         
-         // Передача данных в DMA-контроллер I2S.
-         // Параметр portMAX_DELAY критически важен: он переводит задачу
-         // в режим ожидания (Blocked) до момента аппаратного освобождения буфера.
-         // Это предотвращает срабатывание сторожевого таймера (Watchdog).
-         i2s_write(I2S_PORT, samples, sizeof(samples), &bytesWritten, portMAX_DELAY);
-     }
- }
- 
- void initAudio() {
-     // Структура конфигурации параметров шины I2S
-     i2s_config_t i2s_config = {
-         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), // ESP32 - мастер, только передача
-         .sample_rate = SAMPLE_RATE,                          // 16 000 Гц
-         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,        // Разрядность 16 бит
-         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,        // Стерео формат
-         .communication_format = I2S_COMM_FORMAT_STAND_I2S,   // Стандартный протокол I2S
-         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,            // Приоритет прерывания
-         .dma_buf_count = 4,                                  // Количество DMA буферов
-         .dma_buf_len = 256,                                  // Длина каждого буфера
-         .use_apll = false,                                   // Использовать стандартный PLL
-         .tx_desc_auto_clear = true                           // Очистка от шума при нехватке данных
-     };
- 
-     // Структура конфигурации пинов I2S
-     i2s_pin_config_t pin_config = {
-         .bck_io_num = PIN_I2S_BCLK,
-         .ws_io_num = PIN_I2S_LRC,
-         .data_out_num = PIN_I2S_DIN,
-         .data_in_num = I2S_PIN_NO_CHANGE // Входные данные не используются
-     };
- 
-     // Применение конфигурации на аппаратном уровне
-     i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-     i2s_set_pin(I2S_PORT, &pin_config);
-     i2s_zero_dma_buffer(I2S_PORT); // Принудительное обнуление для тишины при старте
- 
-     // Запуск задачи в операционной системе FreeRTOS
-     xTaskCreatePinnedToCore(
-         audioTask,        // Функция, реализующая задачу
-         "AudioTask",      // Имя задачи
-         4096,             // Выделенный стек (4 КБ)
-         NULL,             // Параметры не передаются
-         1,                // Низкий приоритет, чтобы не мешать критическим задачам
-         &audioTaskHandle, // Указатель на хэндл
-         0                 // Привязка к Ядру 0 (PRO_CPU)
-     );
- }
+#include "audio_system.h"
+#include <driver/i2s.h>
+#include <LittleFS.h>
+
+const i2s_port_t I2S_PORT = I2S_NUM_0;
+const int SAMPLE_RATE = 16000;
+const int PIN_I2S_BCLK = 26;
+const int PIN_I2S_LRC = 25;
+const int PIN_I2S_DIN = 27;
+
+TaskHandle_t audioTaskHandle = NULL;
+
+/**
+ * @brief Фоновая задача для Ядра 0: Чтение WAV и отправка в I2S
+ */
+void audioTask(void *pvParameters) {
+    // Открываем файл холостого хода
+    File audioFile = LittleFS.open("/idle.wav", "r");
+    if (!audioFile) {
+        Serial.println("AUDIO ERROR: /idle.wav not found!");
+        vTaskDelete(NULL); // Уничтожаем задачу, если файла нет
+        return;
+    }
+
+    const int numSamples = 128; // Размер чанка
+    int16_t outSamples[numSamples * 2]; // Буфер для I2S (Стерео: L + R)
+    uint8_t fileBuffer[numSamples * 2]; // Буфер для чтения файла (Моно 16-bit = 2 байта на сэмпл)
+
+    // Пропускаем стандартный 44-байтный WAV-заголовок
+    audioFile.seek(44);
+
+    while (true) {
+        // Если до конца файла осталось меньше одного полного буфера — зацикливаем
+        if (audioFile.available() < sizeof(fileBuffer)) {
+            audioFile.seek(44); 
+        }
+
+        // Читаем блок данных из флеш-памяти
+        size_t bytesRead = audioFile.read(fileBuffer, sizeof(fileBuffer));
+        int samplesRead = bytesRead / 2; // 2 байта на 1 сэмпл (16-bit)
+        
+        // Преобразуем массив байт в массив 16-битных целых чисел
+        int16_t *rawSamples = (int16_t *)fileBuffer;
+
+        // Дублируем Моно-сигнал в Левый и Правый каналы I2S
+        for (int i = 0; i < samplesRead; i++) {
+            outSamples[i * 2] = rawSamples[i];       // Левый
+            outSamples[i * 2 + 1] = rawSamples[i];   // Правый
+        }
+
+        size_t bytesWritten;
+        // Блокирующая передача в DMA
+        i2s_write(I2S_PORT, outSamples, samplesRead * 4, &bytesWritten, portMAX_DELAY);
+    }
+}
+
+void initAudio() {
+    // Инициализация файловой системы
+    if (!LittleFS.begin(true)) {
+        Serial.println("AUDIO ERROR: LittleFS Mount Failed");
+        return; // Прерываем инициализацию аудио, если FS не работает
+    }
+
+    // Настройка I2S
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 4,
+        .dma_buf_len = 256,
+        .use_apll = true,
+        .tx_desc_auto_clear = true
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = PIN_I2S_BCLK,
+        .ws_io_num = PIN_I2S_LRC,
+        .data_out_num = PIN_I2S_DIN,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+
+    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT, &pin_config);
+    i2s_zero_dma_buffer(I2S_PORT);
+
+    // Запуск задачи на Ядре 0
+    xTaskCreatePinnedToCore(
+        audioTask,
+        "AudioTask",
+        4096,
+        NULL,
+        1,
+        &audioTaskHandle,
+        0
+    );
+}
