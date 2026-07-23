@@ -1,8 +1,10 @@
 /**
  * @file main.cpp
- * @version 0.4
- * @brief Главный диспетчер задач.
- * * Архитектурный шаг 4: Внедрение модуля управления вращением башни (Канал 4 пульта).
+ * @version 0.6
+ * @brief Главный файл прошивки радиоуправляемого танка 1:16.
+ * * Точка входа в программу. Инициализирует все подсистемы:
+ * моторы, башню, чтение пульта i-BUS и аудио-ядро I2S.
+ * Основной цикл (loop) работает на Ядре 1 и отвечает за парсинг и микширование.
  */
 
  #include <Arduino.h>
@@ -10,7 +12,8 @@
  #include "motor_control.h"
  #include "mixer.h"
  #include "turret_control.h"
- 
+ #include "audio_system.h" // Подключение подсистемы аудио
+
  // Пин управления сервоприводом подъема орудия MG90S (заблокирован до Шага 5)
  const int PIN_SERVO = 14;
  
@@ -34,10 +37,13 @@
    // 3. Инициализация портов связи
    Serial.begin(115200);
    initIBus(PIN_IBUS_RX);
- 
+
+  // Инициализация и запуск I2S аудио на Ядре 0
+   initAudio(); // <--- ДОБАВЛЕНО: Запуск аудио-ядра
+   
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.4]: Turret Control Active.");
+   Serial.println("SYSTEM READY [v0.6]: Turret Control & I2S Audio Active.");
    Serial.println("Waiting for FlySky RC input...");
    Serial.println("================================================\n");
  }
