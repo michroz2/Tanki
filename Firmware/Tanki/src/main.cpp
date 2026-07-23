@@ -1,33 +1,34 @@
 /**
  * @file main.cpp
- * @version 0.3
+ * @version 0.4
  * @brief Главный диспетчер задач.
- * * Архитектурный шаг 3: Внедрение танкового микшера (управление с пульта).
+ * * Архитектурный шаг 4: Внедрение модуля управления вращением башни (Канал 4 пульта).
  */
 
  #include <Arduino.h>
  #include "ibus_parser.h"
  #include "motor_control.h"
  #include "mixer.h"
+ #include "turret_control.h"
  
- // Заблокированная периферия башни и орудия
- const int PIN_TURRET_IN1 = 32;
- const int PIN_TURRET_IN2 = 33;
+ // Пин управления сервоприводом подъема орудия MG90S (заблокирован до Шага 5)
  const int PIN_SERVO = 14;
  
  // Пин аппаратного UART для i-BUS
  const int PIN_IBUS_RX = 34;
  
- void setup() {
-   // 1. Инициализация ходовой части (ШИМ 20 кГц)
-   initMotors();
+ // Константы мертвой зоны для канала башни
+ const int DEADBAND_MIN = 1470;
+ const int DEADBAND_MAX = 1530;
+ const int CENTER_VAL = 1500;
  
-   // 2. Аппаратный Safety Lock для башни и сервопривода
-   pinMode(PIN_TURRET_IN1, OUTPUT);
-   pinMode(PIN_TURRET_IN2, OUTPUT);
+ void setup() {
+   // 1. Инициализация подсистем моторов (ШИМ 20 кГц)
+   initMotors();
+   initTurret();
+ 
+   // 2. Аппаратный Safety Lock для сервопривода орудия
    pinMode(PIN_SERVO, OUTPUT);
-   digitalWrite(PIN_TURRET_IN1, LOW);
-   digitalWrite(PIN_TURRET_IN2, LOW);
    digitalWrite(PIN_SERVO, LOW);
  
    // 3. Инициализация портов связи
@@ -36,7 +37,7 @@
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.3]: Tank Mixer Active.");
+   Serial.println("SYSTEM READY [v0.4]: Turret Control Active.");
    Serial.println("Waiting for FlySky RC input...");
    Serial.println("================================================\n");
  }
@@ -44,26 +45,34 @@
  void loop() {
    static unsigned long lastPrintTime = 0;
  
-   // Опрос приемника
+   // Опрос приемника i-BUS
    if (readIBus()) {
-     // CH2 (индекс 1) - Вперед/Назад (Правый стик по вертикали)
-     // CH1 (индекс 0) - Влево/Вправо (Правый стик по горизонтали)
+     // --- ХОДОВАЯ ЧАСТЬ ---
+     // CH2 (индекс 1) — Газ (Вперед/Назад)
+     // CH1 (индекс 0) — Руль (Влево/Вправо)
      int throttle = channels[1];
      int steering = channels[0];
- 
-     // Передаем данные со стиков в микшер, который сам крутит моторы
      updateMixer(throttle, steering);
  
-     // Вывод телеметрии для визуального контроля (5 раз в секунду)
+     // --- УПРАВЛЕНИЕ БАШНЕЙ ---
+     // CH4 (индекс 3) — Левый стик по горизонтали (Вращение башни)
+     int turretRaw = channels[3];
+     
+     // Применение мертвой зоны
+     if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) {
+       turretRaw = CENTER_VAL;
+     }
+ 
+     // Преобразование диапазона 1000..2000 мкс в ШИМ -255..255
+     int turretSpeed = map(turretRaw, 1000, 2000, -255, 255);
+     setTurretSpeed(turretSpeed);
+ 
+     // Вывод телеметрии для визуального контроля
      unsigned long currentTime = millis();
      if (currentTime - lastPrintTime >= 200) {
        lastPrintTime = currentTime;
-       Serial.printf("Throttle: %4d | Steering: %4d\n", throttle, steering);
+       Serial.printf("Throttle: %4d | Steering: %4d | Turret CH4: %4d -> Speed: %4d\n", 
+                     throttle, steering, channels[3], turretSpeed);
      }
-   } else {
-     // ВАЖНО: Если связь с пультом потеряна (приемник не шлет пакеты),
-     // мы должны немедленно остановить танк! (Failsafe)
-     // Данную логику можно будет расширить, но пока защита базируется на том,
-     // что приемник FS-iA6B при потере связи сам выдает 1500 по всем каналам.
    }
  }
