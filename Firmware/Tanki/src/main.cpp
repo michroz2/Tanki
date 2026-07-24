@@ -1,8 +1,8 @@
 /**
  * @file main.cpp
- * @version 0.9
+ * @version 0.9.1 (Hotfix)
  * @brief Главный файл прошивки радиоуправляемого танка 1:16.
- * * Внедрена функция Safe Start (Арминг).
+ * * Внедрена функция Safe Start (Арминг) + Аппаратный Failsafe (таймаут).
  */
 
  #include <Arduino.h>
@@ -22,6 +22,10 @@
  // Глобальный флаг безопасности
  bool isSystemArmed = false; 
  
+ // Таймер для отслеживания связи с пультом (Failsafe)
+ unsigned long lastPacketTime = 0;
+ const unsigned long SIGNAL_TIMEOUT_MS = 200; // Если сигнала нет 0.2 сек - тревога
+ 
  void setup() {
    initMotors();
    initTurret();
@@ -36,13 +40,35 @@
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.9]: SAFE START ENABLED.");
-   Serial.println("Waiting for sticks to be centered...");
+   Serial.println("SYSTEM READY [v0.9.1]: SAFE START & FAILSAFE ENABLED.");
+   Serial.println("Waiting for sticks to be centered or Radio to connect...");
    Serial.println("================================================\n");
  }
  
  void loop() {
+   // 1. Читаем данные с приемника. 
+   // Если пришел валидный пакет - обновляем таймер последней активности.
    if (readIBus()) {
+     lastPacketTime = millis();
+   }
+ 
+   // 2. Логика принятия решений вынесена наружу, чтобы работать независимо от пакетов
+   if (millis() - lastPacketTime > SIGNAL_TIMEOUT_MS) {
+     // СИГНАЛ ПОТЕРЯН ИЛИ ПУЛЬТ ВЫКЛЮЧЕН
+     if (isSystemArmed) {
+         Serial.println("WARNING: SIGNAL LOST! Disarming and stopping motors...");
+     }
+     isSystemArmed = false; // Принудительно сбрасываем арминг
+     
+     // Глушим моторы ради безопасности
+     setMotorSpeeds(0, 0);
+     setTurretSpeed(0);
+     
+     // Включаем тревожную сирену
+     setAudioMode(AUDIO_MODE_SIREN);
+     
+   } else {
+     // СИГНАЛ ЕСТЬ (Пульт включен и работает штатно)
      int throttle = channels[1];
      int steering = channels[0];
      int turretRaw = channels[3];
@@ -53,14 +79,13 @@
      bool isTurretCentered = (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX);
  
      if (!isSystemArmed) {
-       // СОСТОЯНИЕ БЛОКИРОВКИ
+       // СОСТОЯНИЕ БЛОКИРОВКИ (Ожидание приведения стиков в центр)
        if (isThrottleCentered && isSteeringCentered && isTurretCentered) {
-         // Успешный Арминг: все стики в центре
          isSystemArmed = true;
          setAudioMode(AUDIO_MODE_ENGINE); // Запуск звука двигателя
          Serial.println("ARMED! System is ready to move.");
        } else {
-         // Стики сдвинуты: блокируем моторы и включаем сирену
+         // Стики сдвинуты: блокируем моторы и продолжаем сирену
          setMotorSpeeds(0, 0);
          setTurretSpeed(0);
          setAudioMode(AUDIO_MODE_SIREN);
