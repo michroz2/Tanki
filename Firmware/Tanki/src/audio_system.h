@@ -1,22 +1,27 @@
 /**
  * @file audio_system.h
- * @version 0.8
+ * @version 0.9
  * @brief Подсистема управления звуком по шине I2S.
- * * Версия 0.8: Добавлена функция динамического изменения частоты
- * дискретизации (Sample Rate) для имитации набора оборотов двигателя.
+ * * Добавлена поддержка режимов (Сирена / Двигатель) для безопасного старта.
  */
 
  #pragma once
 
  #include <Arduino.h>
  
- /**
-  * @brief Инициализирует шину I2S, LittleFS и запускает фоновую аудио-задачу.
-  */
+ // Режимы работы аудио-ядра
+ enum AudioMode {
+     AUDIO_MODE_INIT,    // Ожидание
+     AUDIO_MODE_SIREN,   // Тревожная сирена (стики не по центру)
+     AUDIO_MODE_ENGINE   // Нормальная работа (звук мотора)
+ };
+ 
  void initAudio();
+ void updateEngineSound(int throttle);
  
  /**
-  * @brief Динамически изменяет частоту звука двигателя.
-  * @param throttle Текущее значение канала газа (обычно от 1000 до 2000).
+  * @brief Переключает режим работы аудио-ядра.
+  * @param mode Желаемый режим (Сирена или Двигатель).
   */
- void updateEngineSound(int throttle);
+ void setAudioMode(AudioMode mode);
+ 
