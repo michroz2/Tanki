@@ -1,8 +1,10 @@
 /**
  * @file main.cpp
- * @version 0.9.1 (Hotfix)
+ * @version 0.10
  * @brief Главный файл прошивки радиоуправляемого танка 1:16.
- * * Внедрена функция Safe Start (Арминг) + Аппаратный Failsafe (таймаут).
+ * * Внедрена архитектура Конечного Автомата (FSM).
+ * * Канал 7 (SWA) используется как аппаратный предохранитель.
+ * * Реализована 3-секундная фаза запуска двигателя с блокировкой ввода.
  */
 
  #include <Arduino.h>
@@ -19,12 +21,31 @@
  const int DEADBAND_MAX = 1530;
  const int CENTER_VAL = 1500;
  
- // Глобальный флаг безопасности
- bool isSystemArmed = false; 
+ // Состояния системы (FSM)
+ enum SystemState {
+     STATE_DISARMED, // Танк выключен тумблером SWA (Тишина)
+     STATE_WARNING,  // Сирена (Стики не в центре или нет связи)
+     STATE_STARTING, // Запуск двигателя (Блокировка на 3 секунды)
+     STATE_RUNNING   // Рабочий режим (Движение и звук мотора)
+ };
  
- // Таймер для отслеживания связи с пультом (Failsafe)
+ SystemState currentState = STATE_DISARMED;
+ 
+ // Таймеры 
  unsigned long lastPacketTime = 0;
- const unsigned long SIGNAL_TIMEOUT_MS = 200; // Если сигнала нет 0.2 сек - тревога
+ const unsigned long SIGNAL_TIMEOUT_MS = 200; 
+ 
+ unsigned long startTimer = 0;
+ const unsigned long START_DURATION_MS = 3000; // 3 секунды на звук стартера
+ 
+ /**
+  * @brief Проверяет, находятся ли все стики в нейтральном положении
+  */
+ bool isSticksCentered(int throttle, int steering, int turret) {
+     return (throttle > DEADBAND_MIN && throttle < DEADBAND_MAX) &&
+            (steering > DEADBAND_MIN && steering < DEADBAND_MAX) &&
+            (turret > DEADBAND_MIN && turret < DEADBAND_MAX);
+ }
  
  void setup() {
    initMotors();
@@ -40,67 +61,102 @@
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.9.1]: SAFE START & FAILSAFE ENABLED.");
-   Serial.println("Waiting for sticks to be centered or Radio to connect...");
+   Serial.println("SYSTEM READY [v0.10]: FSM & Safe Start Architecture.");
+   Serial.println("Turn Switch SWA (Ch7) to ON to initiate starting sequence.");
    Serial.println("================================================\n");
  }
  
  void loop() {
-   // 1. Читаем данные с приемника. 
-   // Если пришел валидный пакет - обновляем таймер последней активности.
    if (readIBus()) {
      lastPacketTime = millis();
    }
  
-   // 2. Логика принятия решений вынесена наружу, чтобы работать независимо от пакетов
-   if (millis() - lastPacketTime > SIGNAL_TIMEOUT_MS) {
-     // СИГНАЛ ПОТЕРЯН ИЛИ ПУЛЬТ ВЫКЛЮЧЕН
-     if (isSystemArmed) {
-         Serial.println("WARNING: SIGNAL LOST! Disarming and stopping motors...");
-     }
-     isSystemArmed = false; // Принудительно сбрасываем арминг
-     
-     // Глушим моторы ради безопасности
-     setMotorSpeeds(0, 0);
-     setTurretSpeed(0);
-     
-     // Включаем тревожную сирену
-     setAudioMode(AUDIO_MODE_SIREN);
-     
-   } else {
-     // СИГНАЛ ЕСТЬ (Пульт включен и работает штатно)
-     int throttle = channels[1];
-     int steering = channels[0];
-     int turretRaw = channels[3];
+   // Сбор текущих показаний пульта
+   int throttle = channels[1];
+   int steering = channels[0];
+   int turretRaw = channels[3];
+   int swa = channels[6]; // Канал 7 (Индекс 6 в массиве)
  
-     // Проверка положения стиков (находятся ли они в центре)
-     bool isThrottleCentered = (throttle > DEADBAND_MIN && throttle < DEADBAND_MAX);
-     bool isSteeringCentered = (steering > DEADBAND_MIN && steering < DEADBAND_MAX);
-     bool isTurretCentered = (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX);
+   // Флаги прерываний
+   bool signalLost = (millis() - lastPacketTime > SIGNAL_TIMEOUT_MS);
+   bool isSwaArmed = (swa > 1500); // Положение 2 (2000)
  
-     if (!isSystemArmed) {
-       // СОСТОЯНИЕ БЛОКИРОВКИ (Ожидание приведения стиков в центр)
-       if (isThrottleCentered && isSteeringCentered && isTurretCentered) {
-         isSystemArmed = true;
-         setAudioMode(AUDIO_MODE_ENGINE); // Запуск звука двигателя
-         Serial.println("ARMED! System is ready to move.");
-       } else {
-         // Стики сдвинуты: блокируем моторы и продолжаем сирену
-         setMotorSpeeds(0, 0);
-         setTurretSpeed(0);
-         setAudioMode(AUDIO_MODE_SIREN);
+   // ---------------------------------------------------------
+   // 1. АППАРАТНЫЕ ПЕРЕХВАТЫ (Высший приоритет)
+   // ---------------------------------------------------------
+   if (signalLost) {
+     // Обрыв связи: немедленный переход в предупреждение
+     currentState = STATE_WARNING;
+   } else if (!isSwaArmed) {
+     // Тумблер SWA в положении 1: мгновенная смерть
+     currentState = STATE_DISARMED;
+   }
+ 
+   // ---------------------------------------------------------
+   // 2. ОБРАБОТКА ТЕКУЩЕГО СОСТОЯНИЯ (FSM)
+   // ---------------------------------------------------------
+   switch (currentState) {
+       
+     case STATE_DISARMED:
+       setMotorSpeeds(0, 0);
+       setTurretSpeed(0);
+       setAudioMode(AUDIO_MODE_MUTE);
+ 
+       // Переход к старту, если включили тумблер
+       if (isSwaArmed && !signalLost) {
+         if (isSticksCentered(throttle, steering, turretRaw)) {
+           currentState = STATE_STARTING;
+           startTimer = millis();
+           setAudioMode(AUDIO_MODE_START);
+           Serial.println("STARTING ENGINE...");
+         } else {
+           currentState = STATE_WARNING;
+         }
        }
-     } else {
-       // НОРМАЛЬНОЕ СОСТОЯНИЕ УПРАВЛЕНИЯ (после успешного арминга)
+       break;
+ 
+     case STATE_WARNING:
+       setMotorSpeeds(0, 0);
+       setTurretSpeed(0);
+       setAudioMode(AUDIO_MODE_SIREN);
+ 
+       // Переход к старту, если вернули стики в центр
+       if (isSwaArmed && !signalLost) {
+         if (isSticksCentered(throttle, steering, turretRaw)) {
+           currentState = STATE_STARTING;
+           startTimer = millis();
+           setAudioMode(AUDIO_MODE_START);
+           Serial.println("STARTING ENGINE...");
+         }
+       }
+       break;
+ 
+     case STATE_STARTING:
+       // В этом режиме гусеницы обесточены, а стики игнорируются!
+       setMotorSpeeds(0, 0);
+       setTurretSpeed(0);
+       
+       // Ожидание завершения звука start.wav (3 секунды)
+       if (millis() - startTimer >= START_DURATION_MS) {
+         currentState = STATE_RUNNING;
+         setAudioMode(AUDIO_MODE_ENGINE); // Переключаем на холостой ход
+         Serial.println("ENGINE RUNNING. ARMED!");
+       }
+       break;
+ 
+     case STATE_RUNNING:
+       // Штатное управление гусеницами
        updateMixer(throttle, steering);
        
+       // Штатное управление башней
        if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) {
          turretRaw = CENTER_VAL;
        }
        int turretSpeed = map(turretRaw, 1000, 2000, -255, 255);
        setTurretSpeed(turretSpeed);
        
+       // Динамический звук мотора
        updateEngineSound(throttle);
-     }
+       break;
    }
  }
