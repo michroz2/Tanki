@@ -1,8 +1,9 @@
 /**
  * @file main.cpp
- * @version 0.11-LOG
- * @brief Главный файл прошивки (Переходный этап к новой FSM).
- * Цель: Проверить устранение Deadlock-а I2S при переключении тумблеров.
+ * @version 0.20-LOG
+ * @brief Главный файл прошивки. 
+ * Внедрена полная Машина Состояний (FSM) согласно спецификации.
+ * Реализовано инерционное торможение и автоотключение (30 сек).
  */
 
  #include <Arduino.h>
@@ -20,24 +21,38 @@
  const int CENTER_VAL = 1500;
  
  enum SystemState {
+     STATE_DISCONNECTED, 
      STATE_DISARMED, 
-     STATE_WARNING,  
-     STATE_STARTING, 
-     STATE_RUNNING   
+     STATE_STARTFAIL,  
+     STATE_START, 
+     STATE_RUNNING,
+     STATE_SHUTDOWN   
  };
  
- SystemState currentState = STATE_DISARMED;
- SystemState previousState = STATE_DISARMED; 
- const char* stateNames[] = {"DISARMED", "WARNING", "STARTING", "RUNNING"};
+ SystemState currentState = STATE_DISCONNECTED;
+ SystemState previousState = STATE_DISCONNECTED; 
+ bool isFirstLoop = true;
+ 
+ const char* stateNames[] = {"DISCONNECTED", "DISARMED", "STARTFAIL", "START", "RUNNING", "SHUTDOWN"};
  
  unsigned long lastPacketTime = 0;
  const unsigned long SIGNAL_TIMEOUT_MS = 200; 
  
  unsigned long startTimer = 0;
- const unsigned long START_DURATION_MS = 3000; 
+ const unsigned long START_DURATION_MS = 3500; // Время на start.wav
  
  unsigned long warningStartTime = 0; 
  const unsigned long SIREN_MAX_DURATION_MS = 15000; 
+ 
+ unsigned long lastActivityTime = 0;
+ const unsigned long AUTO_SHUTDOWN_MS = 30000; // 30 секунд простоя
+ 
+ unsigned long shutdownStartTime = 0;
+ int brakingStartThrottle = 1500;
+ int brakingStartSteering = 1500;
+ int lastThrottle = 1500;
+ int lastSteering = 1500;
+ 
  unsigned long lastDiagLogTime = 0; 
  
  bool isSticksCentered(int throttle, int steering, int turret) {
@@ -49,18 +64,16 @@
  void setup() {
    initMotors();
    initTurret();
- 
    pinMode(PIN_SERVO, OUTPUT);
    digitalWrite(PIN_SERVO, LOW);
  
    Serial.begin(115200);
    initIBus(PIN_IBUS_RX);
- 
    initAudio(); 
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.11-LOG]: I2S DEADLOCK FIX TEST.");
+   Serial.println("SYSTEM READY [v0.20-LOG]: NEW FSM & SMART BRAKING.");
    Serial.println("================================================\n");
  }
  
@@ -77,18 +90,26 @@
    int vrA       = channels[4]; 
    int swa       = channels[6]; 
  
-   if (vrA < 1050) {
-       setAudioVolume(0.0f);
-   } else {
-       float vol = (vrA - 1050) / 950.0f;
-       setAudioVolume(vol);
-   }
+   if (vrA < 1050) setAudioVolume(0.0f);
+   else setAudioVolume((vrA - 1050) / 950.0f);
  
    bool rxTimeout   = (millis() - lastPacketTime > SIGNAL_TIMEOUT_MS);
    bool ch3Failsafe = (ch3 <= 1000); 
    bool signalLost  = rxTimeout || ch3Failsafe;
    bool isSwaArmed  = (swa > 1500);
+   bool isCentered  = isSticksCentered(throttle, steering, turretRaw);
  
+   // Инициализация правильного состояния при запуске МК
+   if (isFirstLoop) {
+       if (signalLost) currentState = STATE_DISCONNECTED;
+       else if (!isSwaArmed) currentState = STATE_DISARMED;
+       else currentState = STATE_STARTFAIL;
+       previousState = currentState;
+       warningStartTime = millis();
+       isFirstLoop = false;
+   }
+ 
+   // --- ЛОГИРОВАНИЕ ---
    if (currentState != previousState) {
        Serial.print("\n>>> STATE TRANSITION: ");
        Serial.print(stateNames[previousState]);
@@ -99,86 +120,132 @@
  
    if (millis() - lastDiagLogTime >= 1000) {
        lastDiagLogTime = millis();
-       Serial.printf("[DIAG] State:%s | signalLost:%d | isSwaArmed:%d | Centered:%d | CH3:%d | SWA:%d\n",
-                     stateNames[currentState], signalLost, isSwaArmed, 
-                     isSticksCentered(throttle, steering, turretRaw), ch3, swa);
+       Serial.printf("[DIAG] State:%s | signalLost:%d | SWA:%d | Centered:%d\n",
+                     stateNames[currentState], signalLost, swa, isCentered);
    }
+   // -------------------
  
-   if (signalLost) {
-     if (currentState != STATE_WARNING) {
-       currentState = STATE_WARNING;
-       warningStartTime = millis(); 
-     }
-   } else if (!isSwaArmed) {
-     currentState = STATE_DISARMED;
-   }
- 
+   // ОБРАБОТКА СОСТОЯНИЙ (НОВАЯ FSM)
    switch (currentState) {
+ 
+     case STATE_DISCONNECTED:
+       setMotorSpeeds(0, 0);
+       setTurretSpeed(0);
+       if (millis() - warningStartTime < SIREN_MAX_DURATION_MS) setAudioMode(AUDIO_MODE_SIREN);
+       else setAudioMode(AUDIO_MODE_MUTE);
+       
+       if (!signalLost) {
+           if (!isSwaArmed) currentState = STATE_DISARMED;
+           else currentState = STATE_STARTFAIL;
+       }
+       break;
+ 
      case STATE_DISARMED:
        setMotorSpeeds(0, 0);
        setTurretSpeed(0);
        setAudioMode(AUDIO_MODE_MUTE);
  
-       if (isSwaArmed && !signalLost) {
-         if (isSticksCentered(throttle, steering, turretRaw)) {
-           currentState = STATE_STARTING;
-           startTimer = millis();
-           setAudioMode(AUDIO_MODE_START);
-         } else {
-           currentState = STATE_WARNING;
+       if (signalLost) {
+           currentState = STATE_DISCONNECTED;
            warningStartTime = millis();
-         }
+       } else if (isSwaArmed) {
+           if (isCentered) {
+               currentState = STATE_START;
+               startTimer = millis();
+               setAudioMode(AUDIO_MODE_START);
+           } else {
+               currentState = STATE_STARTFAIL;
+           }
        }
        break;
  
-     case STATE_WARNING:
+     case STATE_STARTFAIL:
        setMotorSpeeds(0, 0);
        setTurretSpeed(0);
+       setAudioMode(AUDIO_MODE_SIREN);
  
-       if (millis() - warningStartTime < SIREN_MAX_DURATION_MS) {
-         setAudioMode(AUDIO_MODE_SIREN);
-       } else {
-         setAudioMode(AUDIO_MODE_MUTE); 
-       }
- 
-       if (isSwaArmed && !signalLost) {
-         Serial.println("[DEBUG] WARNING -> Signal restored & SWA armed. Checking sticks...");
-         if (isSticksCentered(throttle, steering, turretRaw)) {
-           Serial.println("[DEBUG] Sticks are centered! Triggering STARTING...");
-           currentState = STATE_STARTING;
+       if (signalLost) {
+           currentState = STATE_DISCONNECTED;
+           warningStartTime = millis();
+       } else if (!isSwaArmed) {
+           currentState = STATE_DISARMED;
+       } else if (isCentered) {
+           currentState = STATE_START;
            startTimer = millis();
            setAudioMode(AUDIO_MODE_START);
-           Serial.println("[DEBUG] setAudioMode(AUDIO_MODE_START) executed safely (No Deadlock).");
-         } else {
-           static unsigned long lastSticksLog = 0;
-           if (millis() - lastSticksLog > 500) {
-               lastSticksLog = millis();
-               Serial.printf("[DEBUG] Waiting for sticks center. Throt:%d, Steer:%d, Turret:%d\n", throttle, steering, turretRaw);
-           }
-         }
        }
        break;
  
-     case STATE_STARTING:
+     case STATE_START:
        setMotorSpeeds(0, 0);
        setTurretSpeed(0);
        
-       if (millis() - startTimer >= START_DURATION_MS) {
-         currentState = STATE_RUNNING;
-         setAudioMode(AUDIO_MODE_ENGINE);
+       if (signalLost || !isSwaArmed) {
+           currentState = STATE_SHUTDOWN;
+           shutdownStartTime = millis();
+           brakingStartThrottle = 1500;
+           brakingStartSteering = 1500;
+           setAudioMode(AUDIO_MODE_STOP);
+       } else if (millis() - startTimer >= START_DURATION_MS) {
+           currentState = STATE_RUNNING;
+           lastActivityTime = millis();
+           setAudioMode(AUDIO_MODE_ENGINE); 
        }
        break;
  
      case STATE_RUNNING:
+       // Запоминаем текущие стики для потенциального торможения
+       lastThrottle = throttle;
+       lastSteering = steering;
        updateMixer(throttle, steering);
        
-       if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) {
-         turretRaw = CENTER_VAL;
-       }
-       int turretSpeed = map(turretRaw, 1000, 2000, -255, 255);
-       setTurretSpeed(turretSpeed);
+       if (!isCentered) lastActivityTime = millis(); 
        
+       if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) turretRaw = CENTER_VAL;
+       setTurretSpeed(map(turretRaw, 1000, 2000, -255, 255));
        updateEngineSound(throttle);
+ 
+       // Проверка условий перехода в SHUTDOWN
+       if (signalLost || !isSwaArmed || (millis() - lastActivityTime > AUTO_SHUTDOWN_MS)) {
+           currentState = STATE_SHUTDOWN;
+           shutdownStartTime = millis();
+           brakingStartThrottle = lastThrottle;
+           brakingStartSteering = lastSteering;
+           setAudioMode(AUDIO_MODE_STOP);
+           Serial.println("[DEBUG] SHUTDOWN TRIGGERED! Initiating 2-second brake...");
+       }
+       break;
+ 
+     case STATE_SHUTDOWN:
+       unsigned long shutdownElapsed = millis() - shutdownStartTime;
+       
+       // ФАЗА 1: Плавное торможение (0 .. 2000 мс)
+       if (shutdownElapsed < 2000) {
+           float progress = (float)shutdownElapsed / 2000.0f;
+           // Плавное возвращение виртуальных стиков в центр (1500)
+           int currT = brakingStartThrottle + (1500 - brakingStartThrottle) * progress;
+           int currS = brakingStartSteering + (1500 - brakingStartSteering) * progress;
+           updateMixer(currT, currS);
+           setTurretSpeed(0);
+       } 
+       // ФАЗА 2: Жесткая остановка и блокировка (2000 .. 5000 мс)
+       else if (shutdownElapsed < 5000) {
+           setMotorSpeeds(0, 0);
+           setTurretSpeed(0);
+       } 
+       // ФАЗА 3: Снятие блокировки и переходы
+       else {
+           setMotorSpeeds(0, 0);
+           setTurretSpeed(0);
+           
+           if (signalLost) {
+               currentState = STATE_DISCONNECTED;
+               warningStartTime = millis();
+           } else if (!isSwaArmed) {
+               currentState = STATE_DISARMED;
+           }
+           // Если связь есть и SWA все еще ВКЛЮЧЕН -> остаемся в глухой блокировке SHUTDOWN.
+       }
        break;
    }
  }
