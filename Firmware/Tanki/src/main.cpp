@@ -1,9 +1,8 @@
 /**
  * @file main.cpp
- * @version 0.20-LOG
+ * @version 0.21-LOG
  * @brief Главный файл прошивки. 
- * Внедрена полная Машина Состояний (FSM) согласно спецификации.
- * Реализовано инерционное торможение и автоотключение (30 сек).
+ * Фикс бага инерционного торможения при отключенном Failsafe приемника.
  */
 
  #include <Arduino.h>
@@ -39,13 +38,13 @@
  const unsigned long SIGNAL_TIMEOUT_MS = 200; 
  
  unsigned long startTimer = 0;
- const unsigned long START_DURATION_MS = 3500; // Время на start.wav
+ const unsigned long START_DURATION_MS = 3500; 
  
  unsigned long warningStartTime = 0; 
  const unsigned long SIREN_MAX_DURATION_MS = 15000; 
  
  unsigned long lastActivityTime = 0;
- const unsigned long AUTO_SHUTDOWN_MS = 30000; // 30 секунд простоя
+ const unsigned long AUTO_SHUTDOWN_MS = 30000; 
  
  unsigned long shutdownStartTime = 0;
  int brakingStartThrottle = 1500;
@@ -73,7 +72,7 @@
  
    delay(200);
    Serial.println("\n================================================");
-   Serial.println("SYSTEM READY [v0.20-LOG]: NEW FSM & SMART BRAKING.");
+   Serial.println("SYSTEM READY [v0.21-LOG]: FAILSAFE BRAKING FIX.");
    Serial.println("================================================\n");
  }
  
@@ -99,7 +98,6 @@
    bool isSwaArmed  = (swa > 1500);
    bool isCentered  = isSticksCentered(throttle, steering, turretRaw);
  
-   // Инициализация правильного состояния при запуске МК
    if (isFirstLoop) {
        if (signalLost) currentState = STATE_DISCONNECTED;
        else if (!isSwaArmed) currentState = STATE_DISARMED;
@@ -109,7 +107,6 @@
        isFirstLoop = false;
    }
  
-   // --- ЛОГИРОВАНИЕ ---
    if (currentState != previousState) {
        Serial.print("\n>>> STATE TRANSITION: ");
        Serial.print(stateNames[previousState]);
@@ -123,9 +120,7 @@
        Serial.printf("[DIAG] State:%s | signalLost:%d | SWA:%d | Centered:%d\n",
                      stateNames[currentState], signalLost, swa, isCentered);
    }
-   // -------------------
  
-   // ОБРАБОТКА СОСТОЯНИЙ (НОВАЯ FSM)
    switch (currentState) {
  
      case STATE_DISCONNECTED:
@@ -194,7 +189,21 @@
        break;
  
      case STATE_RUNNING:
-       // Запоминаем текущие стики для потенциального торможения
+       // ВАЖНО: 1. Проверяем аварии ДО применения стиков!
+       if (signalLost || !isSwaArmed || (millis() - lastActivityTime > AUTO_SHUTDOWN_MS)) {
+           currentState = STATE_SHUTDOWN;
+           shutdownStartTime = millis();
+           
+           // Берем последние ВАЛИДНЫЕ значения стиков с прошлого цикла (а не текущие нули)
+           brakingStartThrottle = lastThrottle;
+           brakingStartSteering = lastSteering;
+           
+           setAudioMode(AUDIO_MODE_STOP);
+           Serial.println("[DEBUG] SHUTDOWN TRIGGERED! Initiating safe 2-second brake...");
+           break; // Немедленно выходим из case, чтобы не крутить моторы мусором
+       }
+ 
+       // 2. Если всё ОК — едем как обычно и сохраняем валидные стики
        lastThrottle = throttle;
        lastSteering = steering;
        updateMixer(throttle, steering);
@@ -204,36 +213,22 @@
        if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) turretRaw = CENTER_VAL;
        setTurretSpeed(map(turretRaw, 1000, 2000, -255, 255));
        updateEngineSound(throttle);
- 
-       // Проверка условий перехода в SHUTDOWN
-       if (signalLost || !isSwaArmed || (millis() - lastActivityTime > AUTO_SHUTDOWN_MS)) {
-           currentState = STATE_SHUTDOWN;
-           shutdownStartTime = millis();
-           brakingStartThrottle = lastThrottle;
-           brakingStartSteering = lastSteering;
-           setAudioMode(AUDIO_MODE_STOP);
-           Serial.println("[DEBUG] SHUTDOWN TRIGGERED! Initiating 2-second brake...");
-       }
        break;
  
      case STATE_SHUTDOWN:
        unsigned long shutdownElapsed = millis() - shutdownStartTime;
        
-       // ФАЗА 1: Плавное торможение (0 .. 2000 мс)
        if (shutdownElapsed < 2000) {
            float progress = (float)shutdownElapsed / 2000.0f;
-           // Плавное возвращение виртуальных стиков в центр (1500)
            int currT = brakingStartThrottle + (1500 - brakingStartThrottle) * progress;
            int currS = brakingStartSteering + (1500 - brakingStartSteering) * progress;
            updateMixer(currT, currS);
            setTurretSpeed(0);
        } 
-       // ФАЗА 2: Жесткая остановка и блокировка (2000 .. 5000 мс)
        else if (shutdownElapsed < 5000) {
            setMotorSpeeds(0, 0);
            setTurretSpeed(0);
        } 
-       // ФАЗА 3: Снятие блокировки и переходы
        else {
            setMotorSpeeds(0, 0);
            setTurretSpeed(0);
@@ -244,7 +239,6 @@
            } else if (!isSwaArmed) {
                currentState = STATE_DISARMED;
            }
-           // Если связь есть и SWA все еще ВКЛЮЧЕН -> остаемся в глухой блокировке SHUTDOWN.
        }
        break;
    }
