@@ -1,9 +1,10 @@
 /**
  * @file audio_system.cpp
- * @version 0.10
- * @brief Реализация подсистемы управления звуком I2S.
- * * Интегрировано динамическое переключение файлов (start.wav -> idle.wav)
- * на стороне Ядра 0 без блокировки основного цикла управления.
+ * @version 0.11
+ * @brief Многопоточная подсистема I2S-аудио.
+ * * Имплементировано безопасное переключение контекста (Thread-Safe I2S).
+ * * Автоматическая склейка файлов (start.wav -> idle.wav).
+ * * Новая формула громкости для сирены (VRA + MAX) / 2.
  */
 
  #include "audio_system.h"
@@ -19,86 +20,110 @@
  const int PIN_I2S_DIN = 27;
  
  TaskHandle_t audioTaskHandle = NULL;
- uint32_t currentSampleRate = BASE_SAMPLE_RATE;
- volatile AudioMode currentAudioMode = AUDIO_MODE_MUTE; // Стартуем в режиме тишины
  
+ // Глобальные "целевые" переменные. Ядро 1 только пишет сюда, Ядро 0 читает и применяет.
+ volatile AudioMode targetAudioMode = AUDIO_MODE_MUTE;
+ volatile uint32_t targetSampleRate = BASE_SAMPLE_RATE;
+ volatile float currentVolume = 1.0f;
+ 
+ void setAudioVolume(float volume) {
+     currentVolume = constrain(volume, 0.0f, 1.0f);
+ }
+ 
+ // Теперь функция не дергает I2S аппаратно, она просто ставит задачу для Ядра 0
  void setAudioMode(AudioMode mode) {
-     if (currentAudioMode != mode) {
-         currentAudioMode = mode;
-         // При смене режима сбрасываем частоту Audio PLL на базовую (16kHz)
-         if (mode == AUDIO_MODE_SIREN || mode == AUDIO_MODE_MUTE || mode == AUDIO_MODE_START) {
-             currentSampleRate = BASE_SAMPLE_RATE;
-             i2s_set_sample_rates(I2S_PORT, currentSampleRate);
-         }
+     targetAudioMode = mode;
+     if (mode == AUDIO_MODE_SIREN || mode == AUDIO_MODE_MUTE || mode == AUDIO_MODE_START || mode == AUDIO_MODE_STOP) {
+         targetSampleRate = BASE_SAMPLE_RATE;
      }
  }
  
- /**
-  * @brief Фоновая задача для Ядра 0
-  */
+ void updateEngineSound(int throttle) {
+     if (targetAudioMode != AUDIO_MODE_ENGINE) return;
+ 
+     int diff = 0;
+     uint32_t newRate = BASE_SAMPLE_RATE;
+ 
+     if (throttle > 1530) diff = throttle - 1530;
+     else if (throttle < 1470) diff = 1470 - throttle;
+ 
+     if (diff > 0) {
+         newRate = BASE_SAMPLE_RATE + map(diff, 0, 470, 0, (MAX_SAMPLE_RATE - BASE_SAMPLE_RATE));
+         newRate = constrain(newRate, BASE_SAMPLE_RATE, MAX_SAMPLE_RATE);
+     }
+     
+     // Просто обновляем целевую частоту
+     targetSampleRate = newRate;
+ }
+ 
  void audioTask(void *pvParameters) {
      File audioFile;
-     AudioMode lastMode = AUDIO_MODE_MUTE; // Отслеживаем изменения для открытия файлов
+     // Локальные "активные" переменные Ядра 0
+     AudioMode activeAudioMode = AUDIO_MODE_MUTE;
+     uint32_t activeSampleRate = BASE_SAMPLE_RATE;
  
      const int numSamples = 128; 
      int16_t outSamples[numSamples * 2]; 
      uint8_t fileBuffer[numSamples * 2]; 
  
-     // Переменные для математической сирены
      uint32_t sirenTimeCounter = 0;
      float phase = 0.0;
  
      while (true) {
-         // 1. ПЕРЕКЛЮЧЕНИЕ ФАЙЛОВ ПРИ СМЕНЕ РЕЖИМА
-         if (currentAudioMode != lastMode) {
-             if (audioFile) {
-                 audioFile.close(); // Закрываем предыдущий файл
+         // 1. ПРОВЕРКА ЗАДАЧ ОТ ЯДРА 1 (Смена режима или частоты)
+         if (activeAudioMode != targetAudioMode || activeSampleRate != targetSampleRate) {
+             
+             if (activeSampleRate != targetSampleRate) {
+                 activeSampleRate = targetSampleRate;
+                 i2s_set_sample_rates(I2S_PORT, activeSampleRate);
              }
-             
-             if (currentAudioMode == AUDIO_MODE_START) {
-                 audioFile = LittleFS.open("/start.wav", "r");
-                 if (audioFile) audioFile.seek(44);
-                 else Serial.println("AUDIO ERR: /start.wav not found!");
-             } 
-             else if (currentAudioMode == AUDIO_MODE_ENGINE) {
-                 audioFile = LittleFS.open("/idle.wav", "r");
-                 if (audioFile) audioFile.seek(44);
-                 else Serial.println("AUDIO ERR: /idle.wav not found!");
+ 
+             if (activeAudioMode != targetAudioMode) {
+                 Serial.printf("[AUDIO CORE 0] Переход режима: %d -> %d\n", activeAudioMode, targetAudioMode);
+                 activeAudioMode = targetAudioMode;
+                 sirenTimeCounter = 0;
+                 phase = 0.0;
+                 
+                 if (audioFile) audioFile.close();
+                 
+                 if (activeAudioMode == AUDIO_MODE_START) {
+                     audioFile = LittleFS.open("/start.wav", "r");
+                     if (audioFile) audioFile.seek(44);
+                 } else if (activeAudioMode == AUDIO_MODE_ENGINE) {
+                     audioFile = LittleFS.open("/idle.wav", "r");
+                     if (audioFile) audioFile.seek(44);
+                 } else if (activeAudioMode == AUDIO_MODE_STOP) {
+                     audioFile = LittleFS.open("/stop.wav", "r");
+                     if (audioFile) audioFile.seek(44);
+                 }
              }
-             
-             // Сброс счетчиков сирены на случай возврата в этот режим
-             sirenTimeCounter = 0;
-             phase = 0.0;
-             
-             lastMode = currentAudioMode;
          }
  
-         // 2. ГЕНЕРАЦИЯ ИЛИ ЧТЕНИЕ ЗВУКА
-         if (currentAudioMode == AUDIO_MODE_MUTE) {
-             // Тишина
+         // 2. ВОСПРОИЗВЕДЕНИЕ
+         if (activeAudioMode == AUDIO_MODE_MUTE) {
              memset(outSamples, 0, sizeof(outSamples));
              size_t bytesWritten;
              i2s_write(I2S_PORT, outSamples, sizeof(outSamples), &bytesWritten, portMAX_DELAY);
          } 
-         else if (currentAudioMode == AUDIO_MODE_SIREN) {
-             // Математическая сирена
+         else if (activeAudioMode == AUDIO_MODE_SIREN) {
+             // НОВАЯ ФОРМУЛА: Громкость = (Текущая + Максимум) / 2
+             float sirenVol = (currentVolume + 1.0f) / 2.0f;
+             
              for (int i = 0; i < numSamples; i++) {
                  int16_t sample = 0;
                  if (sirenTimeCounter < 8000) { 
                      float phaseInc = (2.0f * PI * 600.0) / BASE_SAMPLE_RATE;
-                     sample = (int16_t)(sin(phase) * 8000.0);
+                     sample = (int16_t)(sin(phase) * 8000.0 * sirenVol);
                      phase += phaseInc;
                  } else if (sirenTimeCounter < 16000) { 
                      float phaseInc = (2.0f * PI * 400.0) / BASE_SAMPLE_RATE;
-                     sample = (int16_t)(sin(phase) * 8000.0);
+                     sample = (int16_t)(sin(phase) * 8000.0 * sirenVol);
                      phase += phaseInc;
                  } else if (sirenTimeCounter < 48000) { 
-                     sample = 0;
-                     phase = 0;
+                     sample = 0; phase = 0;
                  } else {
                      sirenTimeCounter = 0; 
                  }
- 
                  if (phase >= 2.0f * PI) phase -= 2.0f * PI;
                  outSamples[i * 2] = sample;       
                  outSamples[i * 2 + 1] = sample;   
@@ -107,33 +132,43 @@
              size_t bytesWritten;
              i2s_write(I2S_PORT, outSamples, numSamples * 4, &bytesWritten, portMAX_DELAY);
          } 
-         else if (currentAudioMode == AUDIO_MODE_START || currentAudioMode == AUDIO_MODE_ENGINE) {
-             // Чтение из активного файла (start.wav или idle.wav)
+         else if (activeAudioMode == AUDIO_MODE_START || activeAudioMode == AUDIO_MODE_ENGINE || activeAudioMode == AUDIO_MODE_STOP) {
+             size_t bytesRead = 0;
              if (audioFile) {
-                 if (audioFile.available() < sizeof(fileBuffer)) {
-                     audioFile.seek(44); // Зацикливаем файл при достижении конца
-                 }
-                 size_t bytesRead = audioFile.read(fileBuffer, sizeof(fileBuffer));
+                 bytesRead = audioFile.read(fileBuffer, sizeof(fileBuffer));
+             }
+ 
+             if (bytesRead > 0) {
                  int samplesRead = bytesRead / 2; 
                  int16_t *rawSamples = (int16_t *)fileBuffer;
  
                  for (int i = 0; i < samplesRead; i++) {
-                     outSamples[i * 2] = rawSamples[i];       
-                     outSamples[i * 2 + 1] = rawSamples[i];   
+                     int16_t scaledSample = (int16_t)(rawSamples[i] * currentVolume);
+                     outSamples[i * 2] = scaledSample;       
+                     outSamples[i * 2 + 1] = scaledSample;   
                  }
                  size_t bytesWritten;
                  i2s_write(I2S_PORT, outSamples, samplesRead * 4, &bytesWritten, portMAX_DELAY);
              } else {
-                 // Защита от зависания, если файл отсутствует в памяти
-                 memset(outSamples, 0, sizeof(outSamples));
-                 size_t bytesWritten;
-                 i2s_write(I2S_PORT, outSamples, sizeof(outSamples), &bytesWritten, portMAX_DELAY);
+                 // КОНЕЦ ФАЙЛА ДОСТИГНУТ: Автоматическая логика переключений
+                 if (activeAudioMode == AUDIO_MODE_START) {
+                     Serial.println("[AUDIO CORE 0] start.wav закончился. Склейка -> idle.wav");
+                     targetAudioMode = AUDIO_MODE_ENGINE;
+                 } else if (activeAudioMode == AUDIO_MODE_ENGINE) {
+                     if (audioFile) audioFile.seek(44); // Зацикливаем звук мотора
+                 } else if (activeAudioMode == AUDIO_MODE_STOP) {
+                     Serial.println("[AUDIO CORE 0] stop.wav закончился. Переход в MUTE");
+                     targetAudioMode = AUDIO_MODE_MUTE;
+                 } else {
+                     memset(outSamples, 0, sizeof(outSamples));
+                     size_t bytesWritten;
+                     i2s_write(I2S_PORT, outSamples, sizeof(outSamples), &bytesWritten, portMAX_DELAY);
+                 }
              }
          }
      }
  }
  
- // initAudio и updateEngineSound остаются без изменений из предыдущей версии
  void initAudio() {
      if (!LittleFS.begin(true)) {
          Serial.println("AUDIO ERROR: LittleFS Mount Failed");
@@ -160,26 +195,7 @@
      i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
      i2s_set_pin(I2S_PORT, &pin_config);
      i2s_zero_dma_buffer(I2S_PORT);
+     
+     // Запуск на Ядре 0 с приоритетом 1
      xTaskCreatePinnedToCore(audioTask, "AudioTask", 4096, NULL, 1, &audioTaskHandle, 0);
- }
- 
- void updateEngineSound(int throttle) {
-     if (currentAudioMode != AUDIO_MODE_ENGINE) return;
- 
-     int diff = 0;
-     uint32_t targetRate = BASE_SAMPLE_RATE;
- 
-     if (throttle > 1530) diff = throttle - 1530;
-     else if (throttle < 1470) diff = 1470 - throttle;
- 
-     if (diff > 0) {
-         targetRate = BASE_SAMPLE_RATE + map(diff, 0, 470, 0, (MAX_SAMPLE_RATE - BASE_SAMPLE_RATE));
-         targetRate = constrain(targetRate, BASE_SAMPLE_RATE, MAX_SAMPLE_RATE);
-     }
- 
-     if (abs((long)targetRate - (long)currentSampleRate) > 300 || 
-        (targetRate == BASE_SAMPLE_RATE && currentSampleRate != BASE_SAMPLE_RATE)) {
-         currentSampleRate = targetRate;
-         i2s_set_sample_rates(I2S_PORT, currentSampleRate);
-     }
  }
