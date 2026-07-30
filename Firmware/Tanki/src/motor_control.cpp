@@ -1,16 +1,12 @@
 /**
  * @file motor_control.cpp
- * @version 0.2
+ * @version 1.1
  * @brief Реализация управления ходовой частью с использованием подсистемы LEDC.
+ * * v1.1: Миграция пинов и частоты в глобальный config.h
  */
 
  #include "motor_control.h"
-
- // --- ПИНЫ УПРАВЛЕНИЯ ---
- const int PIN_L_PWM_FWD = 16;
- const int PIN_L_PWM_REV = 17;
- const int PIN_R_PWM_FWD = 19;
- const int PIN_R_PWM_REV = 23;
+ #include "config.h"
  
  // --- НАСТРОЙКА АППАРАТНОГО ШИМ (LEDC) ---
  // ESP32 имеет 16 независимых каналов генерации ШИМ. Выделяем первые 4 для ходовой.
@@ -19,19 +15,14 @@
  const int PWM_CH_R_FWD = 2;
  const int PWM_CH_R_REV = 3;
  
- // Частота 20 кГц гарантирует отсутствие "писка" в обмотках моторов
- const int PWM_FREQ = 20000; 
- // 8 бит дают нам шкалу мощности от 0 до 255
- const int PWM_RES = 8;      
- 
  void initMotors() {
-     // 1. Настройка частоты и разрешения для выделенных каналов
-     ledcSetup(PWM_CH_L_FWD, PWM_FREQ, PWM_RES);
-     ledcSetup(PWM_CH_L_REV, PWM_FREQ, PWM_RES);
-     ledcSetup(PWM_CH_R_FWD, PWM_FREQ, PWM_RES);
-     ledcSetup(PWM_CH_R_REV, PWM_FREQ, PWM_RES);
+     // 1. Настройка частоты и разрешения для выделенных каналов (из config.h)
+     ledcSetup(PWM_CH_L_FWD, PWM_FREQUENCY, PWM_RESOLUTION);
+     ledcSetup(PWM_CH_L_REV, PWM_FREQUENCY, PWM_RESOLUTION);
+     ledcSetup(PWM_CH_R_FWD, PWM_FREQUENCY, PWM_RESOLUTION);
+     ledcSetup(PWM_CH_R_REV, PWM_FREQUENCY, PWM_RESOLUTION);
  
-     // 2. Аппаратная привязка физических пинов к каналам генератора
+     // 2. Аппаратная привязка физических пинов к каналам генератора (из config.h)
      ledcAttachPin(PIN_L_PWM_FWD, PWM_CH_L_FWD);
      ledcAttachPin(PIN_L_PWM_REV, PWM_CH_L_REV);
      ledcAttachPin(PIN_R_PWM_FWD, PWM_CH_R_FWD);

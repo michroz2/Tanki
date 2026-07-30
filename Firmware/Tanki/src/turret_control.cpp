@@ -1,31 +1,24 @@
 /**
  * @file turret_control.cpp
- * @version 0.4
+ * @version 1.1
  * @brief Реализация управления приводом башни с использованием подсистемы LEDC.
+ * * v1.1: Миграция пинов и частоты в глобальный config.h
  */
 
  #include "turret_control.h"
-
- // --- ФИЗИЧЕСКИЕ ПИНЫ УПРАВЛЕНИЯ БАШНЕЙ ---
- const int PIN_TURRET_IN1 = 32;
- const int PIN_TURRET_IN2 = 33;
+ #include "config.h"
  
  // --- НАСТРОЙКА АППАРАТНОГО ШИМ (LEDC) ---
  // Выделяем каналы 4 и 5 (каналы 0–3 заняты ходовой частью)
  const int PWM_CH_TURRET_IN1 = 4;
  const int PWM_CH_TURRET_IN2 = 5;
  
- // Частота 20 кГц (унифицирована с ходовой частью)
- const int PWM_FREQ = 20000; 
- // Разрешение 8 бит (шкала мощности 0..255)
- const int PWM_RES = 8;      
- 
  void initTurret() {
-     // 1. Настройка частоты и разрешения для выделенных каналов ШИМ
-     ledcSetup(PWM_CH_TURRET_IN1, PWM_FREQ, PWM_RES);
-     ledcSetup(PWM_CH_TURRET_IN2, PWM_FREQ, PWM_RES);
+     // 1. Настройка частоты и разрешения для выделенных каналов ШИМ (из config.h)
+     ledcSetup(PWM_CH_TURRET_IN1, PWM_FREQUENCY, PWM_RESOLUTION);
+     ledcSetup(PWM_CH_TURRET_IN2, PWM_FREQUENCY, PWM_RESOLUTION);
  
-     // 2. Привязка физических пинов к каналам генератора
+     // 2. Привязка физических пинов к каналам генератора (из config.h)
      ledcAttachPin(PIN_TURRET_IN1, PWM_CH_TURRET_IN1);
      ledcAttachPin(PIN_TURRET_IN2, PWM_CH_TURRET_IN2);
  

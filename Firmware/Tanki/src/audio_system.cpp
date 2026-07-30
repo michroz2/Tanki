@@ -1,24 +1,21 @@
 /**
  * @file audio_system.cpp
- * @version 1.0
+ * @version 1.1
  * @brief Реализация многопоточной подсистемы I2S-аудио для ESP32.
  * * Архитектура построена на базе FreeRTOS. Фоновая задача audioTask привязана 
- * к Ядру 0, что исключает любые конфликты с основным циклом loop() на Ядре 1 
- * и предотвращает межъядерные зависания (Deadlock).
+ * к Ядру 0, что исключает любые конфликты с основным циклом loop() на Ядре 1.
+ * * v1.1: Миграция пинов и имён файлов в глобальный config.h
  */
 
  #include "audio_system.h"
+ #include "config.h"
  #include <driver/i2s.h>
  #include <LittleFS.h>
  #include <math.h>
  
- // Аппаратные константы шины I2S и усилителя MAX98357A
  const i2s_port_t I2S_PORT = I2S_NUM_0;
  const int BASE_SAMPLE_RATE = 16000;    // Базовая частота дискретизации (16 кГц)
  const int MAX_SAMPLE_RATE = 26000;     // Максимальная частота дискретизации при полном газе
- const int PIN_I2S_BCLK = 26;           // Пин тактирования бит (Bit Clock)
- const int PIN_I2S_LRC = 25;            // Пин выбора канала (Left/Right Clock / Word Select)
- const int PIN_I2S_DIN = 27;            // Пин данных (Data In)
  
  // Дескриптор задачи FreeRTOS для управления фоновым потоком аудио
  TaskHandle_t audioTaskHandle = NULL;
@@ -108,13 +105,13 @@
                  
                  // Открываем соответствующий WAV-файл из LittleFS и пропускаем заголовок (44 байта)
                  if (activeAudioMode == AUDIO_MODE_START) {
-                     audioFile = LittleFS.open("/start.wav", "r");
+                     audioFile = LittleFS.open(AUDIO_START_FILE, "r");
                      if (audioFile) audioFile.seek(44);
                  } else if (activeAudioMode == AUDIO_MODE_ENGINE) {
-                     audioFile = LittleFS.open("/idle.wav", "r");
+                     audioFile = LittleFS.open(AUDIO_IDLE_FILE, "r");
                      if (audioFile) audioFile.seek(44);
                  } else if (activeAudioMode == AUDIO_MODE_STOP) {
-                     audioFile = LittleFS.open("/stop.wav", "r");
+                     audioFile = LittleFS.open(AUDIO_STOP_FILE, "r");
                      if (audioFile) audioFile.seek(44);
                  }
              }
@@ -129,7 +126,6 @@
          } 
          else if (activeAudioMode == AUDIO_MODE_SIREN) {
              // Режим SIREN: программная генерация двухтональной сирены
-             // Формула громкости: среднее арифметическое между текущим VRA и 100% (max)
              float sirenVol = (currentVolume + 1.0f) / 2.0f;
              
              for (int i = 0; i < numSamples; i++) {
@@ -216,7 +212,7 @@
          .tx_desc_auto_clear = true
      };
      
-     // Назначение физических пинов I2S
+     // Назначение физических пинов I2S (макросы из config.h)
      i2s_pin_config_t pin_config = {
          .bck_io_num = PIN_I2S_BCLK,
          .ws_io_num = PIN_I2S_LRC,
