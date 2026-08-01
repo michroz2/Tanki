@@ -1,8 +1,8 @@
 /**
  * @file config.h
- * @version 1.4
+ * @version 1.5
  * @brief Hardware Abstraction Layer и глобальные настройки проекта Tanki
- * @details v1.4: Исправлено имя макроса пина данных I2S (PIN_I2S_DIN) для устранения ошибки компиляции.
+ * @details v1.5: Добавлены настройки АЦП, резистивного делителя и защита от неподключенного сенсора.
  */
 
  #ifndef CONFIG_H
@@ -15,6 +15,7 @@
      
      // --- Радиоуправление (FlySky i-BUS) ---
      #define PIN_IBUS_RX          34  // Вход UART2 RX (Input Only)
+     #define PIN_TELEMETRY_TX     22  // Выход UART для телеметрии (i-BUS Sens)
  
      // --- Ходовая часть (BTS7960 - 4 канала ШИМ) ---
      #define PIN_L_PWM_FWD        16
@@ -32,10 +33,12 @@
      #define PIN_I2S_LRC          25
      #define PIN_I2S_DIN          27
  
+     // --- Мониторинг питания ---
+     #define PIN_BAT_ADC          35  // Вход АЦП с делителя напряжения
+ 
  #else
      #error "Критическая ошибка компиляции: Плата не выбрана! Укажите -D TANK_BOARD_LOLIN или -D TANK_BOARD_DEVKIT в platformio.ini."
  #endif
- 
  
  // ==========================================
  // 2. НАСТРОЙКИ ЛОГИКИ И МОДЕЛИ ТАНКА
@@ -55,17 +58,23 @@
      #define AUDIO_STOP_FILE      "/stop.wav"
      
  #else
-     #error "Критическая ошибка компиляции: Модель танка не выбрана! Укажите -D TANK_MODEL_T3 или -D TANK_MODEL_T4."
+     #error "Критическая ошибка компиляции: Модель танка не выбрана!"
  #endif
- 
  
  // ==========================================
  // 3. ОБЩИЕ СИСТЕМНЫЕ НАСТРОЙКИ (FreeRTOS & FSM)
  // ==========================================
- #define SIGNAL_TIMEOUT_MS    100    // Таймаут потери связи i-BUS
- #define EMERGENCY_COUNTER    200    // Счетчик защиты Failsafe
- #define PWM_FREQUENCY        20000  // Ультразвуковая частота ШИМ (20 кГц)
- #define PWM_RESOLUTION       8      // 8-битное разрешение ШИМ (0-255)
- #define MAX_INERTIA_TIME_MS  5000   // Максимальное время разгона/торможения (0..100% ШИМ) при VRB=2000 мкс
+ #define SIGNAL_TIMEOUT_MS    100    
+ #define EMERGENCY_COUNTER    200    
+ #define PWM_FREQUENCY        20000  
+ #define PWM_RESOLUTION       8      
+ #define MAX_INERTIA_TIME_MS  5000   
+ 
+ // Настройки мониторинга АКБ (2S LiFePO4)
+ #define BAT_R1_OHMS             9800.0f // Верхний резистор делителя
+ #define BAT_R2_OHMS             4600.0f // Нижний резистор делителя
+ #define BAT_CUTOFF_VOLTS        5.0f    // Критическое напряжение (2.5В на банку)
+ #define BAT_DISCONNECTED_VOLTS  3.0f    // Напряжение ниже которого сенсор считается оторванным (защита от дурака)
+ #define BAT_SAG_TIMEOUT_MS      3000    // Задержка отсечки (защита от просадки при старте)
  
  #endif // CONFIG_H
