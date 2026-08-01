@@ -1,8 +1,8 @@
 /**
  * @file config.h
- * @version 1.1
+ * @version 1.4
  * @brief Hardware Abstraction Layer и глобальные настройки проекта Tanki
- * @details Конфигурация пинов, аппаратных таймеров и констант для моделей T3 (LOLIN32 Lite) и T4 (DEVKIT V1)
+ * @details v1.4: Исправлено имя макроса пина данных I2S (PIN_I2S_DIN) для устранения ошибки компиляции.
  */
 
  #ifndef CONFIG_H
@@ -11,8 +11,6 @@
  // ==========================================
  // 1. АППАРАТНЫЕ НАСТРОЙКИ (PINOUT)
  // ==========================================
- // Поскольку распиновка для Т3 и Т4 сейчас абсолютно одинаковая, 
- // мы объединяем их конфигурацию. В будущем здесь можно легко развести пины.
  #if defined(TANK_BOARD_LOLIN) || defined(TANK_BOARD_DEVKIT)
      
      // --- Радиоуправление (FlySky i-BUS) ---
@@ -50,7 +48,7 @@
      #define AUDIO_STOP_FILE      "/stop.wav"
  
  #elif defined(TANK_MODEL_T4)
-     #define TANK_MAX_SPEED       255 // Можно будет изменить физику Т4
+     #define TANK_MAX_SPEED       255
      #define TANK_TURRET_SPEED    150
      #define AUDIO_START_FILE     "/start.wav"
      #define AUDIO_IDLE_FILE      "/idle.wav"
@@ -66,7 +64,8 @@
  // ==========================================
  #define SIGNAL_TIMEOUT_MS    100    // Таймаут потери связи i-BUS
  #define EMERGENCY_COUNTER    200    // Счетчик защиты Failsafe
- #define PWM_FREQUENCY        20000  // Ультразвуковая частота ШИМ (20 кГц) для тихой работы моторов
+ #define PWM_FREQUENCY        20000  // Ультразвуковая частота ШИМ (20 кГц)
  #define PWM_RESOLUTION       8      // 8-битное разрешение ШИМ (0-255)
+ #define MAX_INERTIA_TIME_MS  5000   // Максимальное время разгона/торможения (0..100% ШИМ) при VRB=2000 мкс
  
  #endif // CONFIG_H

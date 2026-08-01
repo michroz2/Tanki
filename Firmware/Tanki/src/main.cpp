@@ -1,11 +1,10 @@
 /**
  * @file main.cpp
- * @version 1.1
+ * @version 1.3
  * @brief Главный файл прошивки радиоуправляемого танка 1:16 (ESP32).
- * * Содержит реализацию конечного автомата (FSM), 
- * алгоритм безопасного инерционного торможения при потере связи, 
- * таймер автоотключения простоя (30 сек) и систему телеметрии.
  * * v1.1: Миграция настроек в глобальный config.h
+ * * v1.2: Расширена телеметрия [DIAG] (добавлены CH1-CH4) для аппаратной отладки.
+ * * v1.3: Интегрирован вызов подсистемы инерции updateMotorInertia(), упрощен FSM SHUTDOWN.
  */
 
  #include <Arduino.h>
@@ -43,8 +42,6 @@
  
  // Таймеры и таймауты
  unsigned long lastPacketTime = 0;
- // SIGNAL_TIMEOUT_MS теперь берется из config.h
- 
  unsigned long startTimer = 0;
  const unsigned long START_DURATION_MS = 3500; // Длительность фазы запуска двигателя
  
@@ -54,13 +51,10 @@
  unsigned long lastActivityTime = 0;
  const unsigned long AUTO_SHUTDOWN_MS = 30000; // Таймер простоя до автоотключения (30 сек)
  
- // Переменные для инерционного торможения и фикса громкости
+ // Переменные для глушения и фикса громкости
  unsigned long shutdownStartTime = 0;
- int brakingStartThrottle = 1500;
- int brakingStartSteering = 1500;
- int lastThrottle = 1500;
- int lastSteering = 1500;
  int lastValidVrA = 2000; // Сохранение громкости (по умолчанию максимум)
+ int lastValidVrB = 1000; // Кэш канала VRB (инерция) при потере связи (по умолчанию 0 сек)
  
  unsigned long lastDiagLogTime = 0; // Таймер для секундной телеметрии
  
@@ -85,7 +79,7 @@
  
      delay(200);
      Serial.println("\n================================================");
-     Serial.println("SYSTEM READY [v1.1]: HAL (config.h) INTEGRATED.");
+     Serial.println("SYSTEM READY [v1.3]: INERTIA ENGINE ACTIVE.");
      Serial.println("================================================\n");
  }
  
@@ -102,6 +96,7 @@
      int turretRaw = channels[3]; // Канал 4: Управление башней
      int ch3       = channels[2]; // Канал 3: Газ/Связь (Failsafe)
      int vrA       = channels[4]; // Канал 5: Крутилка громкости
+     int vrB       = channels[5]; // Канал 6: Крутилка инерции (VRB)
      int swa       = channels[6]; // Канал 7: Тумблер предохранителя SWA
  
      // Определение системных флагов безопасности
@@ -111,16 +106,19 @@
      bool isSwaArmed  = (swa > 1500);             // Тумблер SWA включен (боевой режим)
      bool isCentered  = isSticksCentered(throttle, steering, turretRaw);
  
-     // --- ФИКС ГРОМКОСТИ ---
-     // Кэшируем громкость только если связь стабильна.
+     // --- КЭШИРОВАНИЕ НАСТРОЕК (VR A / VR B) ПРИ СТАБИЛЬНОЙ СВЯЗИ ---
      if (!signalLost) {
          lastValidVrA = vrA;
+         lastValidVrB = vrB;
      }
  
-     // Применяем закэшированную (или актуальную) громкость
+     // Применение громкости
      if (lastValidVrA < 1050) setAudioVolume(0.0f);
      else setAudioVolume((lastValidVrA - 1050) / 950.0f);
-     // -------------------------------
+ 
+     // ВЫЗОВ НЕБЛОКИРУЮЩЕЙ ПОДСИСТЕМЫ ИНЕРЦИИ НА КАЖДОМ ИТЕРАЦИОННОМ ЦИКЛЕ
+     updateMotorInertia(lastValidVrB);
+     // ----------------------------------------------------------------
  
      // Первичная инициализация состояния при подаче питания или ресете МК
      if (isFirstLoop) {
@@ -144,8 +142,10 @@
      // Периодическая секундная телеметрия для отладки
      if (millis() - lastDiagLogTime >= 1000) {
          lastDiagLogTime = millis();
-         Serial.printf("[DIAG] State:%s | signalLost:%d | SWA:%d | Centered:%d\n",
-                       stateNames[currentState], signalLost, swa, isCentered);
+         float inertiaSec = map(constrain(lastValidVrB, 1000, 2000), 1000, 2000, 0, MAX_INERTIA_TIME_MS) / 1000.0f;
+         Serial.printf("[DIAG] State:%s | signalLost:%d | SWA:%d | CH1:%d | CH2:%d | CH3:%d | CH4:%d | CH6(VRB):%d | InertiaSec:%.2fs\n",
+                       stateNames[currentState], signalLost, swa,
+                       steering, throttle, ch3, turretRaw, lastValidVrB, inertiaSec);
      }
  
      // --- ГЛАВНАЯ МАШИНА СОСТОЯНИЙ (FSM) ---
@@ -154,11 +154,9 @@
        case STATE_DISCONNECTED:
          setMotorSpeeds(0, 0);
          setTurretSpeed(0);
-         // Сирена работает первые 15 секунд после обрыва связи, затем тишина
          if (millis() - warningStartTime < SIREN_MAX_DURATION_MS) setAudioMode(AUDIO_MODE_SIREN);
          else setAudioMode(AUDIO_MODE_MUTE);
          
-         // Переход при восстановлении связи
          if (!signalLost) {
              if (!isSwaArmed) currentState = STATE_DISARMED;
              else currentState = STATE_STARTFAIL;
@@ -174,7 +172,6 @@
              currentState = STATE_DISCONNECTED;
              warningStartTime = millis();
          } else if (isSwaArmed) {
-             // Если тумблер включили: проверяем стики. Если в центре — запуск, иначе ошибка.
              if (isCentered) {
                  currentState = STATE_START;
                  startTimer = millis();
@@ -188,7 +185,7 @@
        case STATE_STARTFAIL:
          setMotorSpeeds(0, 0);
          setTurretSpeed(0);
-         setAudioMode(AUDIO_MODE_SIREN); // Ошибка оператора сопровождается сиреной
+         setAudioMode(AUDIO_MODE_SIREN);
  
          if (signalLost) {
              currentState = STATE_DISCONNECTED;
@@ -196,7 +193,6 @@
          } else if (!isSwaArmed) {
              currentState = STATE_DISARMED;
          } else if (isCentered) {
-             // Когда оператор вернул стики в центр — разрешаем запуск
              currentState = STATE_START;
              startTimer = millis();
              setAudioMode(AUDIO_MODE_START);
@@ -207,15 +203,11 @@
          setMotorSpeeds(0, 0);
          setTurretSpeed(0);
          
-         // Экстренный уход в shutdown при обрыве связи или выключении SWA во время запуска
          if (signalLost || !isSwaArmed) {
              currentState = STATE_SHUTDOWN;
              shutdownStartTime = millis();
-             brakingStartThrottle = 1500;
-             brakingStartSteering = 1500;
              setAudioMode(AUDIO_MODE_STOP);
          } else if (millis() - startTimer >= START_DURATION_MS) {
-             // По истечении времени стартового файла переходим в боевой режим
              currentState = STATE_RUNNING;
              lastActivityTime = millis();
              setAudioMode(AUDIO_MODE_ENGINE); 
@@ -223,63 +215,36 @@
          break;
  
        case STATE_RUNNING:
-         // КРИТИЧЕСКИ ВАЖНО: Проверка потери связи ДО применения стиков (защита от мусора при Failsafe OFF)
          if (signalLost || !isSwaArmed || (millis() - lastActivityTime > AUTO_SHUTDOWN_MS)) {
              currentState = STATE_SHUTDOWN;
              shutdownStartTime = millis();
-             
-             // Фиксируем последние ВАЛИДНЫЕ значения стиков перед разрывом связи для плавного тормоза
-             brakingStartThrottle = lastThrottle;
-             brakingStartSteering = lastSteering;
-             
              setAudioMode(AUDIO_MODE_STOP);
-             Serial.println("[DEBUG] SHUTDOWN TRIGGERED! Initiating safe 2-second brake...");
-             break; // Немедленно выходим, исключая обработку нулевых данных приемника
+             Serial.println("[DEBUG] SHUTDOWN TRIGGERED! Initiating smooth inertia brake...");
+             break;
          }
  
-         // Сохраняем валидные данные стиков текущего цикла
-         lastThrottle = throttle;
-         lastSteering = steering;
          updateMixer(throttle, steering);
          
-         // Сброс таймера автоотключения при любом движении стиков
          if (!isCentered) lastActivityTime = millis(); 
          
-         // Управление башней
          if (turretRaw > DEADBAND_MIN && turretRaw < DEADBAND_MAX) turretRaw = CENTER_VAL;
          setTurretSpeed(map(turretRaw, 1000, 2000, -255, 255));
          updateEngineSound(throttle);
          break;
  
        case STATE_SHUTDOWN:
-         unsigned long shutdownElapsed = millis() - shutdownStartTime;
+         // Передаем командование на гашение моторов подсистеме инерции
+         setMotorSpeeds(0, 0);
+         setTurretSpeed(0);
          
-         // ФАЗА 1: Плавное инерционное торможение в течение первых 2 секунд (2000 мс)
-         if (shutdownElapsed < 2000) {
-             float progress = (float)shutdownElapsed / 2000.0f;
-             // Математическое сведение виртуальных стиков из текущей позиции обратно в центр (1500)
-             int currT = brakingStartThrottle + (1500 - brakingStartThrottle) * progress;
-             int currS = brakingStartSteering + (1500 - brakingStartSteering) * progress;
-             updateMixer(currT, currS);
-             setTurretSpeed(0);
-         } 
-         // ФАЗА 2: Жесткое удержание моторов в нуле в течение последующих 3 секунд (до 5000 мс)
-         else if (shutdownElapsed < 5000) {
-             setMotorSpeeds(0, 0);
-             setTurretSpeed(0);
-         } 
-         // ФАЗА 3: Снятие блокировки и разрешенные переходы
-         else {
-             setMotorSpeeds(0, 0);
-             setTurretSpeed(0);
-             
+         // Разрешаем переход дальше только после полного завершения файла stop.wav или таймаута (5 сек)
+         if (millis() - shutdownStartTime >= 5000) {
              if (signalLost) {
                  currentState = STATE_DISCONNECTED;
                  warningStartTime = millis();
              } else if (!isSwaArmed) {
                  currentState = STATE_DISARMED;
              }
-             // Если связь есть, но тумблер SWA всё еще физически поднят — висим в глухой блокировке SHUTDOWN.
          }
          break;
      }
