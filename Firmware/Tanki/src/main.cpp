@@ -1,8 +1,9 @@
 /**
  * @file main.cpp
- * @version 1.5
+ * @version 1.6
  * @brief Главный файл прошивки радиоуправляемого танка 1:16 (ESP32).
- * * v1.5: Интеграция модуля защиты АКБ (battery_monitor). Добавлено STATE_LOW_BATTERY.
+ * * v1.5: Интеграция модуля защиты АКБ (battery_monitor).
+ * * v1.6: Внедрена полудуплексная телеметрия (telemetry) для пульта FS-i6.
  */
 
  #include <Arduino.h>
@@ -13,6 +14,7 @@
  #include "turret_control.h"
  #include "audio_system.h" 
  #include "battery_monitor.h"
+ #include "telemetry.h"
  
  const int DEADBAND_MIN = 1470;
  const int DEADBAND_MAX = 1530;
@@ -25,7 +27,7 @@
      STATE_START,        
      STATE_RUNNING,      
      STATE_SHUTDOWN,
-     STATE_LOW_BATTERY   // НОВОЕ СОСТОЯНИЕ: Критический разряд АКБ
+     STATE_LOW_BATTERY   
  };
  
  SystemState currentState = STATE_DISCONNECTED;
@@ -59,7 +61,9 @@
  void setup() {
      initMotors();
      initTurret();
-     initBatteryMonitor(); // Инициализация АЦП
+     initBatteryMonitor(); 
+     initTelemetry();      // Инициализация UART1 для телеметрии
+ 
      pinMode(PIN_SERVO, OUTPUT);
      digitalWrite(PIN_SERVO, LOW);
  
@@ -69,11 +73,12 @@
  
      delay(200);
      Serial.println("\n================================================");
-     Serial.println("SYSTEM READY [v1.5]: BATTERY MONITOR & FAILSAFE ACTIVE.");
+     Serial.println("SYSTEM READY [v1.6]: TELEMETRY TRANSMITTER ACTIVE.");
      Serial.println("================================================\n");
  }
  
  void loop() {
+     // --- 1. Опрос входных каналов радиоуправления ---
      bool hasValidPacket = readIBus();
      if (hasValidPacket) {
          lastPacketTime = millis();
@@ -103,10 +108,14 @@
  
      updateMotorInertia(lastValidVrB);
      
-     // --- Опрос системы питания ---
+     // --- 2. Опрос АЦП (Система питания) ---
      updateBatteryMonitor();
      bool batteryDead = isBatteryLow();
  
+     // --- 3. Обновление телеметрии (Ответ на запросы пульта) ---
+     updateTelemetry();
+ 
+     // --- 4. Логика машины состояний (FSM) ---
      if (isFirstLoop) {
          if (batteryDead) currentState = STATE_LOW_BATTERY;
          else if (signalLost) currentState = STATE_DISCONNECTED;
@@ -117,7 +126,6 @@
          isFirstLoop = false;
      }
  
-     // --- ПРИОРИТЕТНОЕ ПРЕРЫВАНИЕ: РАЗРЯД АКБ ---
      if (batteryDead && currentState != STATE_LOW_BATTERY) {
          currentState = STATE_LOW_BATTERY;
      }
@@ -134,7 +142,6 @@
          lastDiagLogTime = millis();
          float inertiaSec = map(constrain(lastValidVrB, 1000, 2000), 1000, 2000, 0, MAX_INERTIA_TIME_MS) / 1000.0f;
          
-         // Красивый вывод статуса сенсора
          char batStr[16];
          if (isBatterySensorConnected()) {
              snprintf(batStr, sizeof(batStr), "%.2fV", getBatteryVoltage());
