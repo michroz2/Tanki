@@ -1,9 +1,10 @@
 /**
  * @file main.cpp
- * @version 1.6
+ * @version 1.8
  * @brief Главный файл прошивки радиоуправляемого танка 1:16 (ESP32).
  * * v1.5: Интеграция модуля защиты АКБ (battery_monitor).
  * * v1.6: Внедрена полудуплексная телеметрия (telemetry) для пульта FS-i6.
+ * * v1.8: Добавлена поддержка тумблера SWB (CH8) для переключения на автомобильный реверс.
  */
 
  #include <Arduino.h>
@@ -91,7 +92,8 @@
      int vrA       = channels[4]; 
      int vrB       = channels[5]; 
      int swa       = channels[6]; 
- 
+     int swb       = channels[7]; // Читаем канал 8 (тумблер SWB)
+      
      bool rxTimeout   = (millis() - lastPacketTime > SIGNAL_TIMEOUT_MS);
      bool ch3Failsafe = (ch3 <= 1000); 
      bool signalLost  = rxTimeout || ch3Failsafe; 
@@ -231,7 +233,8 @@
              break;
          }
  
-         updateMixer(throttle, steering);
+        // ПЕРЕДАЕМ SWB В МИКШЕР:
+        updateMixer(throttle, steering, swb);
          
          if (!isCentered) lastActivityTime = millis(); 
          
